@@ -16,6 +16,7 @@
 #include "llvm/ADT/Any.h"
 #include "llvm/ADT/StableHashing.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -63,6 +64,9 @@ static cl::opt<bool>
     PrintChangedBefore("print-before-changed",
                        cl::desc("Print before passes that change them"),
                        cl::init(false), cl::Hidden);
+
+static cl::opt<bool> PrintBPIAfterAll("print-bpi-after-all", cl::init(false),
+                                      cl::Hidden);
 
 // An option for specifying the dot used by
 // print-changed=[dot-cfg | dot-cfg-quiet]
@@ -1417,6 +1421,30 @@ void VerifyInstrumentation::registerCallbacks(
       });
 }
 
+void PrintBPIInstrumentation::registerCallbacks(
+    PassInstrumentationCallbacks &PIC, ModuleAnalysisManager &MAM) {
+
+  bool Registered = false;
+  PIC.registerAfterPassCallback([&MAM, &Registered](
+                                    StringRef P, Any IR,
+                                    const PreservedAnalyses &PA) mutable {
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(
+                       *const_cast<Module *>(unwrapModule(IR, /*Force=*/true)))
+                    .getManager();
+    if (!Registered) {
+      FAM.registerPass([] { return BranchProbabilityAnalysis(); });
+      Registered = true;
+    }
+    for (Function *F : GetFunctions(IR)) {
+      if (!F->isDeclaration()) {
+        FAM.invalidate(*F, PreservedAnalyses::none());
+        auto &BPI = FAM.getResult<BranchProbabilityAnalysis>(*F);
+        BPI.print(dbgs());
+      }
+    }
+  });
+}
+
 InLineChangePrinter::~InLineChangePrinter() = default;
 
 void InLineChangePrinter::generateIRRepresentation(Any IR,
@@ -2432,6 +2460,8 @@ void StandardInstrumentations::registerCallbacks(
   PrintCrashIR.registerCallbacks(PIC);
   if (MAM)
     PreservedCFGChecker.registerCallbacks(PIC, *MAM);
+  if (PrintBPIAfterAll)
+    BPIPrinter.registerCallbacks(PIC, *MAM);
 
   // TimeProfiling records the pass running time cost.
   // Its 'BeforePassCallback' can be appended at the tail of all the
