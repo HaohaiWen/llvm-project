@@ -124,7 +124,8 @@ View the diff from {self.name} here.
         existing_comment = self.find_comment(pr)
 
         if args.write_comment_to_file:
-            self.comment = {"body": comment_text}
+            if create_new or existing_comment:
+                self.comment = {"body": comment_text}
             if existing_comment:
                 self.comment["id"] = existing_comment.id
             return
@@ -214,6 +215,17 @@ class ClangFormatHelper(FormatHelper):
         if args.start_rev and args.end_rev:
             cf_cmd.append(args.start_rev)
             cf_cmd.append(args.end_rev)
+
+        # Gather the extension of all modified files and pass them explicitly to git-clang-format.
+        # This prevents git-clang-format from applying its own filtering rules on top of ours.
+        extensions = set()
+        for file in cpp_files:
+            _, ext = os.path.splitext(file)
+            extensions.add(
+                ext.strip(".")
+            )  # Exclude periods since git-clang-format takes extensions without them
+        cf_cmd.append("--extensions")
+        cf_cmd.append(",".join(extensions))
 
         cf_cmd.append("--")
         cf_cmd += cpp_files

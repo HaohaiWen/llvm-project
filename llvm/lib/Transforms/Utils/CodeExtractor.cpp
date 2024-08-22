@@ -745,7 +745,7 @@ void CodeExtractor::severSplitPHINodesOfEntry(BasicBlock *&Header) {
 /// and other with remaining incoming blocks; then first PHIs are placed in
 /// outlined region.
 void CodeExtractor::severSplitPHINodesOfExits(
-    const SmallPtrSetImpl<BasicBlock *> &Exits) {
+    const SetVector<BasicBlock *> &Exits) {
   for (BasicBlock *ExitBB : Exits) {
     BasicBlock *NewBB = nullptr;
 
@@ -932,6 +932,7 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
       case Attribute::DisableSanitizerInstrumentation:
       case Attribute::FnRetThunkExtern:
       case Attribute::Hot:
+      case Attribute::HybridPatchable:
       case Attribute::NoRecurse:
       case Attribute::InlineHint:
       case Attribute::MinSize:
@@ -954,9 +955,11 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
       case Attribute::ShadowCallStack:
       case Attribute::SanitizeAddress:
       case Attribute::SanitizeMemory:
+      case Attribute::SanitizeNumericalStability:
       case Attribute::SanitizeThread:
       case Attribute::SanitizeHWAddress:
       case Attribute::SanitizeMemTag:
+      case Attribute::SanitizeRealtime:
       case Attribute::SpeculativeLoadHardening:
       case Attribute::StackProtect:
       case Attribute::StackProtectReq:
@@ -1000,6 +1003,7 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
       case Attribute::Writable:
       case Attribute::DeadOnUnwind:
       case Attribute::Range:
+      case Attribute::Initializes:
       //  These are not really attributes.
       case Attribute::None:
       case Attribute::EndAttrKinds:
@@ -1678,8 +1682,9 @@ static void fixupDebugInfoPostExtraction(Function &OldFunc, Function &NewFunc,
     DVR->getMarker()->MarkedInstr->dropOneDbgRecord(DVR);
   DIB.finalizeSubprogram(NewSP);
 
-  // Fix up the scope information attached to the line locations in the new
-  // function.
+  // Fix up the scope information attached to the line locations and the
+  // debug assignment metadata in the new function.
+  DenseMap<DIAssignID *, DIAssignID *> AssignmentIDMap;
   for (Instruction &I : instructions(NewFunc)) {
     if (const DebugLoc &DL = I.getDebugLoc())
       I.setDebugLoc(
@@ -1695,6 +1700,7 @@ static void fixupDebugInfoPostExtraction(Function &OldFunc, Function &NewFunc,
       return MD;
     };
     updateLoopMetadataDebugLocations(I, updateLoopInfoLoc);
+    at::remapAssignID(AssignmentIDMap, I);
   }
   if (!TheCall.getDebugLoc())
     TheCall.setDebugLoc(DILocation::get(Ctx, 0, 0, OldSP));
@@ -1751,7 +1757,7 @@ CodeExtractor::extractCodeRegion(const CodeExtractorAnalysisCache &CEAC,
   // Calculate the exit blocks for the extracted region and the total exit
   // weights for each of those blocks.
   DenseMap<BasicBlock *, BlockFrequency> ExitWeights;
-  SmallPtrSet<BasicBlock *, 1> ExitBlocks;
+  SetVector<BasicBlock *> ExitBlocks;
   for (BasicBlock *Block : Blocks) {
     for (BasicBlock *Succ : successors(Block)) {
       if (!Blocks.count(Succ)) {
