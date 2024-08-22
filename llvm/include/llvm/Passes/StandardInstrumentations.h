@@ -471,6 +471,12 @@ public:
                          ModuleAnalysisManager &MAM);
 };
 
+class PrintBPCInstrumentation {
+public:
+  void registerCallbacks(PassInstrumentationCallbacks &PIC,
+                         ModuleAnalysisManager &MAM);
+};
+
 /// This class implements --time-trace functionality for new pass manager.
 /// It provides the pass-instrumentation callbacks that measure the pass
 /// execution time. They collect time tracing info by TimeProfiler.
@@ -602,6 +608,7 @@ class StandardInstrumentations {
   IRChangedTester ChangeTester;
   VerifyInstrumentation Verify;
   PrintBPIInstrumentation BPIPrinter;
+  PrintBPCInstrumentation BPCPrinter;
 
   bool VerifyEach;
 

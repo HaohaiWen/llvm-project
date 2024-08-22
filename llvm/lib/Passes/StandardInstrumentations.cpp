@@ -15,6 +15,7 @@
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/ADT/Any.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Analysis/LazyCallGraph.h"
@@ -70,6 +71,11 @@ static cl::opt<bool>
 
 static cl::opt<bool> PrintBPIAfterAll("print-bpi-after-all", cl::init(false),
                                       cl::Hidden);
+static cl::opt<bool> PrintBPCAfterAll("print-bpc-after-all", cl::init(false),
+                                      cl::Hidden);
+static cl::opt<bool>
+    InvalidTrackingAnalysisAfterAll("invalid-tracking-analysis-after-all",
+                                    cl::init(false), cl::Hidden);
 
 // An option for specifying the dot used by
 // print-changed=[dot-cfg | dot-cfg-quiet]
@@ -1515,7 +1521,6 @@ void VerifyInstrumentation::registerCallbacks(PassInstrumentationCallbacks &PIC,
 
 void PrintBPIInstrumentation::registerCallbacks(
     PassInstrumentationCallbacks &PIC, ModuleAnalysisManager &MAM) {
-
   bool Registered = false;
   PIC.registerAfterPassCallback([&MAM, &Registered](
                                     StringRef P, Any IR,
@@ -1529,9 +1534,47 @@ void PrintBPIInstrumentation::registerCallbacks(
     }
     for (Function *F : GetFunctions(IR)) {
       if (!F->isDeclaration()) {
-        FAM.invalidate(*F, PreservedAnalyses::none());
+        if (InvalidTrackingAnalysisAfterAll) {
+          PreservedAnalyses FPA;
+          FPA.preserve<BranchProbabilityAnalysis>();
+          FAM.invalidate(*F, FPA);
+        }
         auto &BPI = FAM.getResult<BranchProbabilityAnalysis>(*F);
         BPI.print(dbgs());
+      }
+    }
+  });
+}
+
+void PrintBPCInstrumentation::registerCallbacks(
+    PassInstrumentationCallbacks &PIC, ModuleAnalysisManager &MAM) {
+  bool Registered = false;
+  PIC.registerAfterPassCallback([&MAM, &Registered](
+                                    StringRef P, Any IR,
+                                    const PreservedAnalyses &PA) mutable {
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(
+                       *const_cast<Module *>(unwrapModule(IR, /*Force=*/true)))
+                    .getManager();
+    if (!Registered) {
+      FAM.registerPass([] { return BlockFrequencyAnalysis(); });
+      Registered = true;
+    }
+    for (Function *F : GetFunctions(IR)) {
+      if (!F->isDeclaration()) {
+        if (InvalidTrackingAnalysisAfterAll) {
+          PreservedAnalyses FPA;
+          FPA.preserve<BlockFrequencyAnalysis>();
+          FAM.invalidate(*F, FPA);
+        }
+        auto &BFI = FAM.getResult<BlockFrequencyAnalysis>(*F);
+        dbgs() << "BPC for " << F->getName() << "\n";
+        for (BasicBlock &BB : *F) {
+          dbgs() << BB.getNameOrAsOperand() << ": ";
+          if (auto Count = BFI.getBlockProfileCount(&BB))
+            dbgs() << *Count;
+          dbgs() << "\n";
+        }
+        dbgs() << "\n";
       }
     }
   });
@@ -2559,6 +2602,8 @@ void StandardInstrumentations::registerCallbacks(
     PreservedCFGChecker.registerCallbacks(PIC, *MAM);
   if (PrintBPIAfterAll)
     BPIPrinter.registerCallbacks(PIC, *MAM);
+  if (PrintBPCAfterAll)
+    BPCPrinter.registerCallbacks(PIC, *MAM);
 
   // TimeProfiling records the pass running time cost.
   // Its 'BeforePassCallback' can be appended at the tail of all the
