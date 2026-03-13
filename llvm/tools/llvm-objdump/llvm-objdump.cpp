@@ -46,6 +46,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Object/BBAddrMap.h"
 #include "llvm/Object/BuildID.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Object/COFFImportFile.h"
@@ -1961,18 +1962,29 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
   auto ReadBBAddrMap = [&](std::optional<unsigned> SectionIndex =
                                std::nullopt) {
     FullAddrMap.clear();
+    auto AddFunctionEntries =
+        [&](Expected<std::vector<BBAddrMap>> BBAddrMapsOrErr,
+            std::vector<PGOAnalysisMap> PGOAnalyses) {
+          if (!BBAddrMapsOrErr) {
+            reportWarning(toString(BBAddrMapsOrErr.takeError()),
+                          Obj.getFileName());
+            return;
+          }
+          for (auto &&[FunctionBBAddrMap, FunctionPGOAnalysis] :
+               zip_equal(*std::move(BBAddrMapsOrErr), std::move(PGOAnalyses))) {
+            FullAddrMap.AddFunctionEntry(std::move(FunctionBBAddrMap),
+                                         std::move(FunctionPGOAnalysis));
+          }
+        };
+
     if (const auto *Elf = dyn_cast<ELFObjectFileBase>(&Obj)) {
       std::vector<PGOAnalysisMap> PGOAnalyses;
-      auto BBAddrMapsOrErr = Elf->readBBAddrMap(SectionIndex, &PGOAnalyses);
-      if (!BBAddrMapsOrErr) {
-        reportWarning(toString(BBAddrMapsOrErr.takeError()), Obj.getFileName());
-        return;
-      }
-      for (auto &&[FunctionBBAddrMap, FunctionPGOAnalysis] :
-           zip_equal(*std::move(BBAddrMapsOrErr), std::move(PGOAnalyses))) {
-        FullAddrMap.AddFunctionEntry(std::move(FunctionBBAddrMap),
-                                     std::move(FunctionPGOAnalysis));
-      }
+      AddFunctionEntries(Elf->readBBAddrMap(SectionIndex, &PGOAnalyses),
+                         std::move(PGOAnalyses));
+    } else if (const auto *Coff = dyn_cast<COFFObjectFile>(&Obj)) {
+      std::vector<PGOAnalysisMap> PGOAnalyses;
+      AddFunctionEntries(Coff->readBBAddrMap(SectionIndex, &PGOAnalyses),
+                         std::move(PGOAnalyses));
     }
   };
 

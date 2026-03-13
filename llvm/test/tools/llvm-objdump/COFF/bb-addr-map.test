@@ -1,0 +1,149 @@
+## Test that in the presence of COFF .llvm_bb_addr_map sections,
+## --symbolize-operands can display <BB*> labels and PGO annotations.
+
+# RUN: yaml2obj %s -o %t.obj
+# RUN: llvm-objdump %t.obj -d --symbolize-operands --no-show-raw-insn --no-leading-addr | \
+# RUN:   FileCheck %s --check-prefix=RAW
+# RUN: llvm-objdump %t.obj -d --symbolize-operands --pretty-pgo-analysis-map --no-show-raw-insn --no-leading-addr | \
+# RUN:   FileCheck %s --check-prefix=PRETTY
+
+# RAW:      <bar>:
+# RAW-NEXT: <BB0> (Entry count: 100, Frequency: 18014398509481984, Successors: BB1:66666666, BB2:1999999a):
+# RAW-NEXT: testl   %ecx, %ecx
+# RAW-NEXT: jne      <BB2>
+# RAW-NEXT: <BB1> (Frequency: 14411518804230144):
+# RAW-NEXT: xorl    %eax, %eax
+# RAW-NEXT:   retq
+# RAW-NEXT: <BB2> (Frequency: 3602879705251840):
+# RAW-NEXT: movl    $0x1, %eax
+# RAW-NEXT:   retq
+# RAW:      <foo>:
+# RAW-NEXT: <BB0> (Entry count: 200, Frequency: 18014398509481984, Successors: BB1:4ccccccd, BB2:33333333):
+# RAW-NEXT: cmpl    $0x1, %ecx
+# RAW-NEXT: jne      <BB2>
+# RAW-NEXT: <BB1> (Frequency: 10808639107366912):
+# RAW-NEXT: movl    $0x1, %eax
+# RAW-NEXT:   retq
+# RAW-NEXT: <BB2> (Frequency: 7205759402115072):
+# RAW-NEXT: movl    $0x2, %eax
+# RAW-NEXT:   retq
+
+# PRETTY:      <bar>:
+# PRETTY-NEXT: <BB0> (Entry count: 100, Frequency: 1.0, Successors: BB1:[0x66666666 / 0x80000000 = 80.00%], BB2:[0x1999999a / 0x80000000 = 20.00%]):
+# PRETTY-NEXT: testl   %ecx, %ecx
+# PRETTY-NEXT: jne      <BB2>
+# PRETTY-NEXT: <BB1> (Frequency: 0.7999999998):
+# PRETTY-NEXT: xorl    %eax, %eax
+# PRETTY-NEXT:   retq
+# PRETTY-NEXT: <BB2> (Frequency: 0.2000000002):
+# PRETTY-NEXT: movl    $0x1, %eax
+# PRETTY-NEXT:   retq
+# PRETTY:      <foo>:
+# PRETTY-NEXT: <BB0> (Entry count: 200, Frequency: 1.0, Successors: BB1:[0x4ccccccd / 0x80000000 = 60.00%], BB2:[0x33333333 / 0x80000000 = 40.00%]):
+# PRETTY-NEXT: cmpl    $0x1, %ecx
+# PRETTY-NEXT: jne      <BB2>
+# PRETTY-NEXT: <BB1> (Frequency: 0.6000000001):
+# PRETTY-NEXT: movl    $0x1, %eax
+# PRETTY-NEXT:   retq
+# PRETTY-NEXT: <BB2> (Frequency: 0.3999999999):
+# PRETTY-NEXT: movl    $0x2, %eax
+# PRETTY-NEXT:   retq
+
+--- !COFF
+header:
+  Machine:         IMAGE_FILE_MACHINE_AMD64
+  Characteristics: [  ]
+sections:
+  - Name:            .text
+    Characteristics: [ IMAGE_SCN_CNT_CODE, IMAGE_SCN_LNK_COMDAT, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ ]
+    Alignment:       16
+    SectionData:     85C9750331C0C3B801000000C3
+    SizeOfRawData:   13
+  - Name:            .text
+    Characteristics: [ IMAGE_SCN_CNT_CODE, IMAGE_SCN_LNK_COMDAT, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ ]
+    Alignment:       16
+    SectionData:     83F9017506B801000000C3B802000000C3
+    SizeOfRawData:   17
+  - Name:            .llvm_bb_addr_map
+    Characteristics: [ IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_LNK_COMDAT, IMAGE_SCN_MEM_DISCARDABLE, IMAGE_SCN_MEM_READ ]
+    Alignment:       1
+    SectionData:     0507000000000000000000030000040801000301020006016480808080808080200201E6CC99B306029AB3E6CC0180808098B3E6CC1900808080E8CC99B30600
+    SizeOfRawData:   64
+    Relocations:
+      - VirtualAddress:  3
+        SymbolName:      bar
+        Type:            IMAGE_REL_AMD64_ADDR64
+  - Name:            .llvm_bb_addr_map
+    Characteristics: [ IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_LNK_COMDAT, IMAGE_SCN_MEM_DISCARDABLE, IMAGE_SCN_MEM_READ ]
+    Alignment:       1
+    SectionData:     050700000000000000000003000005080100060102000601C80180808080808080200201CD99B3E60402B3E6CC9903808080B4E6CC991300808080CC99B3E60C00
+    SizeOfRawData:   65
+    Relocations:
+      - VirtualAddress:  3
+        SymbolName:      foo
+        Type:            IMAGE_REL_AMD64_ADDR64
+symbols:
+  - Name:            .text
+    Value:           0
+    SectionNumber:   1
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_NULL
+    StorageClass:    IMAGE_SYM_CLASS_STATIC
+    SectionDefinition:
+      Length:          13
+      NumberOfRelocations: 0
+      NumberOfLinenumbers: 0
+      CheckSum:        1669794853
+      Number:          1
+      Selection:       IMAGE_COMDAT_SELECT_NODUPLICATES
+  - Name:            .llvm_bb_addr_map
+    Value:           0
+    SectionNumber:   3
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_NULL
+    StorageClass:    IMAGE_SYM_CLASS_STATIC
+    SectionDefinition:
+      Length:          64
+      NumberOfRelocations: 1
+      NumberOfLinenumbers: 0
+      CheckSum:        192098721
+      Number:          1
+      Selection:       IMAGE_COMDAT_SELECT_ASSOCIATIVE
+  - Name:            .text
+    Value:           0
+    SectionNumber:   2
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_NULL
+    StorageClass:    IMAGE_SYM_CLASS_STATIC
+    SectionDefinition:
+      Length:          17
+      NumberOfRelocations: 0
+      NumberOfLinenumbers: 0
+      CheckSum:        8994300
+      Number:          2
+      Selection:       IMAGE_COMDAT_SELECT_ANY
+  - Name:            bar
+    Value:           0
+    SectionNumber:   1
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_FUNCTION
+    StorageClass:    IMAGE_SYM_CLASS_EXTERNAL
+  - Name:            foo
+    Value:           0
+    SectionNumber:   2
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_FUNCTION
+    StorageClass:    IMAGE_SYM_CLASS_EXTERNAL
+  - Name:            .llvm_bb_addr_map
+    Value:           0
+    SectionNumber:   4
+    SimpleType:      IMAGE_SYM_TYPE_NULL
+    ComplexType:     IMAGE_SYM_DTYPE_NULL
+    StorageClass:    IMAGE_SYM_CLASS_STATIC
+    SectionDefinition:
+      Length:          65
+      NumberOfRelocations: 1
+      NumberOfLinenumbers: 0
+      CheckSum:        2381211191
+      Number:          2
+      Selection:       IMAGE_COMDAT_SELECT_ASSOCIATIVE
