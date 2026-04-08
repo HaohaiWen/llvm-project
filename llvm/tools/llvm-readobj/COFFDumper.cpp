@@ -109,6 +109,7 @@ public:
   void printStackMap() const override;
   void printAddrsig() override;
   void printCGProfile() override;
+  void printBBAddrMaps(bool PrettyPGOAnalysis) override;
   void printStringTable() override;
 
 private:
@@ -168,6 +169,7 @@ private:
   void initializeFileAndStringTables(BinaryStreamReader &Reader);
 
   void cacheRelocations();
+  void cacheFunctionSymbols();
 
   std::error_code resolveSymbol(const coff_section *Section, uint64_t Offset,
                                 SymbolRef &Sym);
@@ -186,6 +188,8 @@ private:
   const llvm::object::COFFObjectFile *Obj;
   bool RelocCached = false;
   RelocMapTy RelocMap;
+  std::optional<DenseMap<uint64_t, SmallVector<COFFSymbolRef, 1>>>
+      FunctionSymbolsByAddress;
 
   DebugChecksumsSubsectionRef CVFileChecksumTable;
 
@@ -663,6 +667,29 @@ void COFFDumper::cacheRelocations() {
     llvm::sort(RM, [](RelocationRef L, RelocationRef R) {
       return L.getOffset() < R.getOffset();
     });
+  }
+}
+
+void COFFDumper::cacheFunctionSymbols() {
+  if (FunctionSymbolsByAddress)
+    return;
+
+  FunctionSymbolsByAddress.emplace();
+
+  for (const SymbolRef &Symbol : Obj->symbols()) {
+    COFFSymbolRef COFFSymbol = Obj->getCOFFSymbol(Symbol);
+
+    SymbolRef::Type Type = unwrapOrError(Obj->getFileName(), Symbol.getType());
+    if (Type != SymbolRef::ST_Function)
+      continue;
+
+    Expected<uint64_t> AddressOrErr = Symbol.getAddress();
+    if (!AddressOrErr) {
+      consumeError(AddressOrErr.takeError());
+      continue;
+    }
+
+    (*FunctionSymbolsByAddress)[*AddressOrErr].push_back(COFFSymbol);
   }
 }
 
@@ -2484,6 +2511,62 @@ void COFFDumper::printCGProfile() {
     W.printNumber("From", getSymbolName(FromIndex), FromIndex);
     W.printNumber("To", getSymbolName(ToIndex), ToIndex);
     W.printNumber("Weight", Count);
+  }
+}
+
+void COFFDumper::printBBAddrMaps(bool PrettyPGOAnalysis) {
+  for (SectionRef S : Obj->sections()) {
+    StringRef Name = unwrapOrError(Obj->getFileName(), S.getName());
+    if (Name != BBAddrMapSectionName)
+      continue;
+
+    ListScope L(W, "BBAddrMap");
+    std::vector<PGOAnalysisMap> PGOAnalyses;
+    Expected<std::vector<BBAddrMap>> BBAddrMapsOrErr =
+        Obj->decodeBBAddrMap(*Obj->getCOFFSection(S), &PGOAnalyses);
+    if (!BBAddrMapsOrErr) {
+      reportUniqueWarning("unable to dump " + Name +
+                          " section: " + toString(BBAddrMapsOrErr.takeError()));
+      continue;
+    }
+
+    cacheFunctionSymbols();
+    std::optional<int32_t> FunctionSectionNumber =
+        Obj->getAssociatedSectionID(Obj->getSectionID(S));
+
+    for (const auto &[AM, PAM] : zip_equal(*BBAddrMapsOrErr, PGOAnalyses)) {
+      DictScope D(W, "Function");
+      W.printHex("At", AM.getFunctionAddress());
+      std::optional<COFFSymbolRef> FuncSymbol;
+      if (auto FuncSymbolsIt =
+              FunctionSymbolsByAddress->find(AM.getFunctionAddress());
+          FuncSymbolsIt != FunctionSymbolsByAddress->end()) {
+        auto SymbolIt =
+            llvm::find_if(FuncSymbolsIt->second, [&](const COFFSymbolRef &S) {
+              return !FunctionSectionNumber ||
+                     S.getSectionNumber() == *FunctionSectionNumber;
+            });
+        if (SymbolIt != FuncSymbolsIt->second.end())
+          FuncSymbol = *SymbolIt;
+      }
+      StringRef FuncName = "<?>";
+      if (!FuncSymbol) {
+        reportUniqueWarning("could not identify function symbol for address "
+                            "(0x" +
+                            Twine::utohexstr(AM.getFunctionAddress()) +
+                            ") in " + Name + " section");
+      } else {
+        if (Expected<StringRef> NameOrErr = Obj->getSymbolName(*FuncSymbol)) {
+          FuncName = *NameOrErr;
+        } else {
+          reportUniqueWarning("unable to read the name of function symbol for "
+                              "address (0x" +
+                              Twine::utohexstr(AM.getFunctionAddress()) +
+                              "): " + toString(NameOrErr.takeError()));
+        }
+      }
+      printBBAddrMapFunction(FuncName, AM, PAM, PrettyPGOAnalysis);
+    }
   }
 }
 

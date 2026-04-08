@@ -24,8 +24,10 @@
 namespace llvm {
 namespace object {
 class Archive;
+struct BBAddrMap;
 class COFFImportFile;
 class ObjectFile;
+struct PGOAnalysisMap;
 class XCOFFObjectFile;
 class ELFObjectFileBase;
 } // namespace object
@@ -194,6 +196,10 @@ public:
 
 protected:
   ScopedPrinter &W;
+
+  void printBBAddrMapFunction(StringRef FuncName, const object::BBAddrMap &AM,
+                              const object::PGOAnalysisMap &PAM,
+                              bool PrettyPGOAnalysis);
 
   static std::vector<object::SectionRef>
   getSectionRefsByNameOrIndex(const object::ObjectFile &Obj,

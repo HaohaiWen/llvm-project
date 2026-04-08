@@ -514,6 +514,8 @@ static void dumpObject(ObjectFile &Obj, ScopedPrinter &Writer,
       Dumper->printCOFFLoadConfig();
     if (opts::CGProfile)
       Dumper->printCGProfile();
+    if (opts::BBAddrMap)
+      Dumper->printBBAddrMaps(opts::PrettyPGOAnalysisMap);
     if (opts::Addrsig)
       Dumper->printAddrsig();
     if (opts::CodeView)
