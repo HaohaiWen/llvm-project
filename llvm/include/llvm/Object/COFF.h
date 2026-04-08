@@ -13,8 +13,10 @@
 #ifndef LLVM_OBJECT_COFF_H
 #define LLVM_OBJECT_COFF_H
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/BinaryFormat/COFF.h"
+#include "llvm/Object/BBAddrMap.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/CVDebugRecord.h"
 #include "llvm/Object/Error.h"
@@ -907,6 +909,7 @@ private:
   const void *LoadConfig = nullptr;
   const chpe_metadata *CHPEMetadata = nullptr;
   const coff_dynamic_reloc_table *DynamicRelocTable = nullptr;
+  mutable std::optional<DenseMap<int32_t, int32_t>> AssociatedSectionNumbers;
 
   Expected<StringRef> getString(uint32_t offset) const;
 
@@ -1089,6 +1092,7 @@ public:
   COFFSymbolRef getCOFFSymbol(const DataRefImpl &Ref) const;
   COFFSymbolRef getCOFFSymbol(const SymbolRef &Symbol) const;
   const coff_relocation *getCOFFRelocation(const RelocationRef &Reloc) const;
+  std::optional<int32_t> getAssociatedSectionID(int32_t SectionID) const;
   unsigned getSectionID(SectionRef Sec) const;
   unsigned getSymbolSectionID(SymbolRef Sym) const;
 
@@ -1186,6 +1190,22 @@ public:
   }
 
   ArrayRef<coff_relocation> getRelocations(const coff_section *Sec) const;
+
+  /// Returns a vector of all BB address maps in the object file. When
+  /// `TextSectionIndex` is specified, only returns the BB address maps
+  /// corresponding to the section with that index. When `PGOAnalyses` is
+  /// specified (PGOAnalyses is not nullptr), the vector is cleared then filled
+  /// with extra PGO data. `PGOAnalyses` will always be the same length as the
+  /// return value when it is requested assuming no error occurs. Upon failure,
+  /// `PGOAnalyses` will be emptied.
+  Expected<std::vector<BBAddrMap>>
+  readBBAddrMap(std::optional<unsigned> TextSectionIndex = std::nullopt,
+                std::vector<PGOAnalysisMap> *PGOAnalyses = nullptr) const;
+
+  /// Decodes BB address maps from one .llvm_bb_addr_map section.
+  Expected<std::vector<BBAddrMap>>
+  decodeBBAddrMap(const coff_section &Sec,
+                  std::vector<PGOAnalysisMap> *PGOAnalyses = nullptr) const;
 
   Expected<StringRef> getSectionName(const coff_section *Sec) const;
   uint64_t getSectionSize(const coff_section *Sec) const;

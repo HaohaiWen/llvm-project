@@ -11,9 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/Object/BBAddrMap.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Object/Error.h"
@@ -1368,10 +1370,173 @@ COFFObjectFile::getCOFFRelocation(const RelocationRef &Reloc) const {
   return toRel(Reloc.getRawDataRefImpl());
 }
 
+std::optional<int32_t>
+COFFObjectFile::getAssociatedSectionID(int32_t SectionID) const {
+  if (!AssociatedSectionNumbers) {
+    AssociatedSectionNumbers.emplace();
+    for (const SymbolRef &Symbol : symbols()) {
+      COFFSymbolRef COFFSymbol = getCOFFSymbol(Symbol);
+      if (!COFFSymbol.isSectionDefinition())
+        continue;
+
+      const coff_aux_section_definition *Aux =
+          COFFSymbol.getSectionDefinition();
+      if (Aux && Aux->Selection == COFF::IMAGE_COMDAT_SELECT_ASSOCIATIVE) {
+        AssociatedSectionNumbers->try_emplace(
+            COFFSymbol.getSectionNumber(),
+            Aux->getNumber(COFFSymbol.isBigObj()));
+      }
+    }
+  }
+
+  if (auto It = AssociatedSectionNumbers->find(SectionID);
+      It != AssociatedSectionNumbers->end())
+    return It->second;
+  return std::nullopt;
+}
+
 ArrayRef<coff_relocation>
 COFFObjectFile::getRelocations(const coff_section *Sec) const {
   return {getFirstReloc(Sec, Data, base()),
           getNumberOfRelocations(Sec, Data, base())};
+}
+
+/// Address extractor for COFF BB address map sections.
+class COFFBBAddrMapAddressExtractor : public AddressExtractor {
+  bool IsRelocatable;
+  // Maps the offset of each address field in the BB addr map section to the
+  // symbol value (section-relative offset) from the relocation.
+  DenseMap<uint64_t, uint64_t> RelocationAddressMap;
+
+  COFFBBAddrMapAddressExtractor(
+      const DataExtractor &Data, bool IsRelocatable,
+      DenseMap<uint64_t, uint64_t> RelocationAddressMap)
+      : AddressExtractor(Data), IsRelocatable(IsRelocatable),
+        RelocationAddressMap(std::move(RelocationAddressMap)) {}
+
+public:
+  static Expected<COFFBBAddrMapAddressExtractor>
+  create(const DataExtractor &Data, const COFFObjectFile &Obj,
+         const coff_section &Sec) {
+    uint16_t ExpectedRelocType;
+    switch (Obj.getMachine()) {
+    case COFF::IMAGE_FILE_MACHINE_AMD64:
+      ExpectedRelocType = COFF::IMAGE_REL_AMD64_ADDR64;
+      break;
+    case COFF::IMAGE_FILE_MACHINE_I386:
+      ExpectedRelocType = COFF::IMAGE_REL_I386_DIR32;
+      break;
+    default:
+      return createError("unsupported COFF machine for BBAddrMap relocation "
+                         "decoding: " +
+                         Twine(Obj.getMachine()));
+    }
+
+    DenseMap<uint64_t, uint64_t> RelocationAddressMap;
+    for (const coff_relocation &Reloc : Obj.getRelocations(&Sec)) {
+      Expected<COFFSymbolRef> SymbolOrErr =
+          Obj.getSymbol(Reloc.SymbolTableIndex);
+      if (!SymbolOrErr)
+        return SymbolOrErr.takeError();
+      if (Reloc.Type != ExpectedRelocType)
+        return createError("unsupported relocation type " +
+                           Obj.getRelocationTypeName(Reloc.Type) + " in " +
+                           BBAddrMapSectionName);
+      RelocationAddressMap[Reloc.VirtualAddress] = SymbolOrErr->getValue();
+    }
+
+    return COFFBBAddrMapAddressExtractor(Data, Obj.isRelocatableObject(),
+                                         std::move(RelocationAddressMap));
+  }
+
+  Expected<uint64_t> extractAddress(DataExtractor::Cursor &Cur) override {
+    uint64_t Offset = Cur.tell();
+    Expected<uint64_t> AddressOrErr = AddressExtractor::extractAddress(Cur);
+    if (!AddressOrErr)
+      return AddressOrErr.takeError();
+    if (!IsRelocatable)
+      return *AddressOrErr;
+    auto It = RelocationAddressMap.find(Offset);
+    if (It == RelocationAddressMap.end())
+      return createError("failed to get relocation data for offset: " +
+                         Twine::utohexstr(Offset));
+    // ELF RELA carries the offset in r_addend; COFF splits it into symbol
+    // value + in-place addend. The in-place addend is always zero for
+    // BBAddrMap, so the symbol value alone suffices.
+    return It->second;
+  }
+};
+
+Expected<std::vector<BBAddrMap>> COFFObjectFile::decodeBBAddrMap(
+    const coff_section &Sec, std::vector<PGOAnalysisMap> *PGOAnalyses) const {
+  ArrayRef<uint8_t> Content;
+  if (Error E = getSectionContents(&Sec, Content))
+    return std::move(E);
+
+  DataExtractor Data(Content, /*IsLittleEndian=*/true, getBytesInAddress());
+  auto ExtractorOrErr = COFFBBAddrMapAddressExtractor::create(Data, *this, Sec);
+  if (!ExtractorOrErr)
+    return ExtractorOrErr.takeError();
+
+  size_t OriginalPGOSize = PGOAnalyses ? PGOAnalyses->size() : 0;
+  auto AddrMapsOrErr = decodeBBAddrMapPayload(*ExtractorOrErr, PGOAnalyses);
+  if (!AddrMapsOrErr && PGOAnalyses)
+    PGOAnalyses->resize(OriginalPGOSize);
+  return AddrMapsOrErr;
+}
+
+Expected<std::vector<BBAddrMap>>
+COFFObjectFile::readBBAddrMap(std::optional<unsigned> TextSectionIndex,
+                              std::vector<PGOAnalysisMap> *PGOAnalyses) const {
+  if (PGOAnalyses)
+    PGOAnalyses->clear();
+
+  // Filter BB addr map sections, optionally matching a text section index.
+  SmallVector<SectionRef> BBAddrMapSections;
+  for (SectionRef Sec : sections()) {
+    Expected<StringRef> NameOrErr = Sec.getName();
+    if (!NameOrErr)
+      return NameOrErr.takeError();
+    if (*NameOrErr != BBAddrMapSectionName)
+      continue;
+
+    if (TextSectionIndex) {
+      unsigned SectionID = getSectionID(Sec);
+      std::optional<int32_t> AssociatedSectionID =
+          getAssociatedSectionID(SectionID);
+      if (!AssociatedSectionID)
+        return createError("unable to get associated section for " +
+                           BBAddrMapSectionName + " section with index " +
+                           Twine(SectionID));
+      // TextSectionIndex uses SectionRef::getIndex() and is therefore 0-based,
+      // while COFF associative COMDAT references store 1-based section IDs.
+      if (*AssociatedSectionID != static_cast<int32_t>(*TextSectionIndex) + 1)
+        continue;
+    }
+    BBAddrMapSections.push_back(Sec);
+  }
+
+  // Decode each matched section.
+  std::vector<BBAddrMap> BBAddrMaps;
+  for (SectionRef Sec : BBAddrMapSections) {
+    Expected<std::vector<BBAddrMap>> AddrMapsOrErr =
+        decodeBBAddrMap(*getCOFFSection(Sec), PGOAnalyses);
+    if (!AddrMapsOrErr) {
+      if (PGOAnalyses)
+        PGOAnalyses->clear();
+      return createError("unable to decode " + BBAddrMapSectionName +
+                         " section with index " + Twine(getSectionID(Sec)) +
+                         ": " + toString(AddrMapsOrErr.takeError()));
+    }
+    std::move(AddrMapsOrErr->begin(), AddrMapsOrErr->end(),
+              std::back_inserter(BBAddrMaps));
+  }
+
+  if (PGOAnalyses)
+    assert(PGOAnalyses->size() == BBAddrMaps.size() &&
+           "The same number of BBAddrMaps and PGOAnalysisMaps should be "
+           "returned when PGO information is requested");
+  return BBAddrMaps;
 }
 
 #define LLVM_COFF_SWITCH_RELOC_TYPE_NAME(reloc_type)                           \
